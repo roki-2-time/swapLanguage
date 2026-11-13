@@ -1,4 +1,5 @@
 import ctypes
+import re
 import time
 import keyboard
 import pyperclip
@@ -16,7 +17,17 @@ RU_BIGRAMS = {
     "ко", "ро", "по", "не", "ал", "ос", "ли", "ка", "ер", "ре",
     "ть", "ся", "ет", "ат", "от", "ел", "ор", "за", "ва", "ак",
     "ом", "он", "ин", "ис", "ем", "им", "ыв", "ый", "ая", "ое",
-    "ие", "чт", "гд", "кд", "зд", "сп", "пж", "жэ", "хъ", "бь"
+    "ие", "чт", "гд", "зд", "сп",
+    # дополнительные частотные пары
+    "бу", "уд", "ду", "да", "де", "до", "ей", "ещ", "ще", "чо",
+    "ше", "хо", "ож", "мо", "ма", "ми", "ме", "му", "мы", "мн",
+    "ну", "ны", "об", "од", "ту", "ты", "ти", "тр", "пе", "пи",
+    "пл", "ле", "лю", "ль", "ла", "ло", "лу", "ды", "же", "жи",
+    "зн", "из", "ид", "ий", "ик", "ир", "ит", "ке", "ки", "кн",
+    "кт", "ку", "ны", "ня", "оч", "ош", "па", "пу", "ры", "са",
+    "св", "сл", "со", "су", "сы", "тв", "те", "чи", "че", "щи",
+    "эт", "яв", "ят", "ую", "ют", "ус", "бо", "бы", "ба", "бе",
+    "ги", "го", "ди", "дн", "дл", "ид", "ог", "ое", "ту", "ук",
 }
 
 EN_BIGRAMS = {
@@ -24,10 +35,22 @@ EN_BIGRAMS = {
     "ti", "es", "or", "te", "of", "ed", "is", "it", "al", "ar",
     "st", "to", "nt", "ng", "se", "ha", "as", "ou", "io", "le",
     "ve", "co", "me", "de", "hi", "ri", "ro", "ic", "ne", "ea",
-    "ra", "ce", "wh", "ll", "ee", "oo", "sh", "ch", "gh"
+    "ra", "ce", "wh", "ll", "ee", "oo", "sh", "ch", "gh",
+    # дополнительные частотные пары
+    "el", "lo", "ow", "ye", "ur", "ut", "ot", "ho", "wa", "ad",
+    "id", "im", "ma", "pl", "pr", "us", "ge", "be", "so", "no",
+    "up", "ay", "ke", "ta", "wo", "rl", "ld", "ab", "ac", "ve",
 }
 
-IGNORE_WORDS = {"git", "npm", "pip", "cd", "ls", "dir", "ssh", "sql", "api", "ok", "lol", "gg", "install"}
+IGNORE_WORDS = {
+    "git", "npm", "pip", "cd", "ls", "dir", "ssh", "sql", "api",
+    "ok", "lol", "gg", "install",
+    "буду", "звучит"
+}
+
+# Одиночные английские буквы, которые нужно превращать в русские слова.
+# При желании можно расширить, но "a" и "i" — настоящие английские слова.
+SINGLE_EN_TO_RU = {"z"}
 
 LANG_EN = 0x0409
 LANG_RU = 0x0419
@@ -55,29 +78,57 @@ def force_switch_layout(target_lang):
         time.sleep(0.04)
 
 
-def get_bigrams(word):
+def bigram_ratio(word, bigrams):
+    """Доля пар букв слова, которые встречаются в наборе bigrams (0..1)."""
     word = word.lower()
-    return {word[i : i + 2] for i in range(len(word) - 1)}
+    pairs = [word[i : i + 2] for i in range(len(word) - 1)]
+    if not pairs:
+        return 0.0
+    return sum(p in bigrams for p in pairs) / len(pairs)
 
 
 def should_switch(word):
-    if len(word) < 2 or word.lower() in IGNORE_WORDS:
+    word_l = word.lower()
+    if not word or word_l in IGNORE_WORDS:
         return None
 
     layout = get_current_layout()
 
+    # --- Односимвольные слова: только z -> я ---
+    if len(word) == 1:
+        if layout == LANG_EN and word_l in SINGLE_EN_TO_RU:
+            return LANG_RU, word.translate(EN_TO_RU)
+        return None
+
     if layout == LANG_EN:
+        # английские сокращения: don't, it's, I'm, we'll ...
+        if re.search(r"'(s|t|d|m|ll|re|ve)$", word_l):
+            return None
+
         converted = word.translate(EN_TO_RU)
-        orig_score = len(get_bigrams(word) & EN_BIGRAMS)
-        conv_score = len(get_bigrams(converted) & RU_BIGRAMS)
-        if conv_score > orig_score or any(c in word[:-1] for c in "[];',.`"):
+        orig = bigram_ratio(word, EN_BIGRAMS)
+        conv = bigram_ratio(converted, RU_BIGRAMS)
+        has_punct = any(c in word[:-1] for c in "[];',.`")
+
+        if conv > orig or (has_punct and conv > 0):
             return LANG_RU, converted
 
     elif layout == LANG_RU:
+        # короткие русские слова (да, ну, еще...) не трогаем
+        if len(word) < 4:
+            return None
+
         converted = word.translate(RU_TO_EN)
-        orig_score = len(get_bigrams(word) & RU_BIGRAMS)
-        conv_score = len(get_bigrams(converted) & EN_BIGRAMS)
-        if conv_score > orig_score:
+
+        # настоящее английское слово состоит только из букв;
+        # если в нём есть , . ; [ ] ' ` — это русское слово с б, ю, ж, х, э...
+        if not converted.isalpha():
+            return None
+
+        orig = bigram_ratio(word, RU_BIGRAMS)
+        conv = bigram_ratio(converted, EN_BIGRAMS)
+
+        if conv >= 0.5 and conv > orig:
             return LANG_EN, converted
 
     return None
