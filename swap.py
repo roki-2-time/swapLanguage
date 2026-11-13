@@ -27,7 +27,7 @@ EN_BIGRAMS = {
     "ra", "ce", "wh", "ll", "ee", "oo", "sh", "ch", "gh"
 }
 
-IGNORE_WORDS = {"git", "npm", "pip", "cd", "ls", "dir", "ssh", "sql", "api", "ok", "lol", "gg"}
+IGNORE_WORDS = {"git", "npm", "pip", "cd", "ls", "dir", "ssh", "sql", "api", "ok", "lol", "gg", "install"}
 
 LANG_EN = 0x0409
 LANG_RU = 0x0419
@@ -47,13 +47,12 @@ def get_current_layout():
 def force_switch_layout(target_lang):
     """Надежно переключает системную раскладку во всех типах окон."""
     hwnd = user32.GetForegroundWindow()
-    # WM_INPUTLANGCHANGEREQUEST = 0x0050
     user32.PostMessageW(hwnd, 0x0050, 0, target_lang)
-    time.sleep(0.02)
+    time.sleep(0.03)
 
     if get_current_layout() != target_lang:
         keyboard.send("alt+shift")
-        time.sleep(0.03)
+        time.sleep(0.04)
 
 
 def get_bigrams(word):
@@ -86,25 +85,31 @@ def should_switch(word):
 
 def replace_word_globally(word_len, converted_word, end_key, target_lang):
     global is_replacing
-    is_replacing = True
+    is_replacing = True  # Блокируем новые нажатия на время исправления
 
     try:
         old_clipboard = pyperclip.paste()
     except Exception:
         old_clipboard = ""
+    time.sleep(0.02)
 
+    # Аккуратно стираем ошибочное слово с небольшой задержкой
     for _ in range(word_len + 1):
         keyboard.send("backspace")
+        time.sleep(0.005)
 
+    # Меняем язык системы
     force_switch_layout(target_lang)
 
+    # Записываем исправленное слово и вставляем через буфер обмена
     pyperclip.copy(converted_word)
-    time.sleep(0.02)
+    time.sleep(0.03)
     keyboard.send("ctrl+v")
-    time.sleep(0.02)
-    keyboard.send(end_key)
+    time.sleep(0.05)  # Даем системе время обработать вставку
+    keyboard.send(end_key)  # Возвращаем пробел или Enter
 
-    time.sleep(0.05)
+    # Возвращаем старый буфер обмена
+    time.sleep(0.1)
     try:
         pyperclip.copy(old_clipboard)
     except Exception:
@@ -116,6 +121,7 @@ def replace_word_globally(word_len, converted_word, end_key, target_lang):
 def on_key_event(event):
     global current_word, is_replacing
 
+    # Игнорируем события во время замены или если клавиша отпущена
     if is_replacing or event.event_type != keyboard.KEY_DOWN:
         return
 
