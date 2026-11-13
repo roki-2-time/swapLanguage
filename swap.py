@@ -6,6 +6,13 @@ import pyperclip
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 
+user32.LoadKeyboardLayoutW.restype = ctypes.c_void_p
+user32.PostMessageW.argtypes = [
+    ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_void_p
+]
+
+WM_INPUTLANGCHANGEREQUEST = 0x0050
+
 DEBUG = False  # поставьте True, чтобы видеть в консоли, что получает скрипт
 
 EN_CHARS = "qwertyuiop[]asdfghjkl;'zxcvbnm,./`QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>?~"
@@ -56,13 +63,14 @@ IGNORE_WORDS = {
 KNOWN_RU_WORDS = {
     "буду", "будет", "будем", "будешь", "будут", "будто",
     "звучит", "звучать", "звучало",
-    "бы", "ещё", "еще", "если", "тогда", "когда", "хорошо", "пишешь"
+    "бы", "ещё", "еще", "если", "тогда", "когда", "хорошо", "пишешь",
 }
 
-# Одиночные английские буквы, которые нужно превращать в русские слова.
-# "a" и "i" — настоящие английские слова, поэтому их не добавляем.
-SINGLE_EN_TO_RU = {"z", "и"}
-SINGLE_RU_TO_EN = {"i"}
+# Односимвольные слова.
+# На английской раскладке: z -> я, b -> и
+SINGLE_EN_TO_RU = {"z", "b"}
+# На русской раскладке: ш -> i (английское "I")
+SINGLE_RU_TO_EN = {"ш"}
 
 LANG_EN = 0x0409
 LANG_RU = 0x0419
@@ -80,14 +88,19 @@ def get_current_layout():
 
 
 def force_switch_layout(target_lang):
-    """Надежно переключает системную раскладку во всех типах окон."""
-    hwnd = user32.GetForegroundWindow()
-    user32.PostMessageW(hwnd, 0x0050, 0, target_lang)
-    time.sleep(0.03)
+    """Переключает раскладку и ждёт, пока она реально сменится."""
+    if get_current_layout() == target_lang:
+        return
 
-    if get_current_layout() != target_lang:
-        keyboard.send("alt+shift")
-        time.sleep(0.04)
+    hwnd = user32.GetForegroundWindow()
+    hkl = user32.LoadKeyboardLayoutW(f"{target_lang:08X}", 1)
+    user32.PostMessageW(hwnd, WM_INPUTLANGCHANGEREQUEST, 0, hkl)
+
+    # Ждём до 0.5 с, пока окно обработает сообщение
+    for _ in range(25):
+        time.sleep(0.02)
+        if get_current_layout() == target_lang:
+            return
 
 
 def bigram_ratio(word, bigrams):
@@ -109,10 +122,12 @@ def should_switch(word):
     if DEBUG:
         print(f"word={word!r} layout={hex(layout)}")
 
-    # --- Односимвольные слова: только z -> я ---
+    # --- Односимвольные слова ---
     if len(word) == 1:
         if layout == LANG_EN and word_l in SINGLE_EN_TO_RU:
             return LANG_RU, word.translate(EN_TO_RU)
+        if layout == LANG_RU and word_l in SINGLE_RU_TO_EN:
+            return LANG_EN, word.translate(RU_TO_EN)
         return None
 
     # --- Известные русские слова: решаем по списку, без биграмм ---
@@ -233,4 +248,7 @@ def on_key_event(event):
 if __name__ == "__main__":
     print("Автопереключатель запущен...")
     keyboard.hook(on_key_event)
-    keyboard.wait()
+    try:
+        keyboard.wait()
+    except KeyboardInterrupt:
+        print("Остановлено.")
