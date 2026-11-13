@@ -54,7 +54,7 @@ EN_BIGRAMS = {
 # Технические слова, которые никогда не трогаем
 IGNORE_WORDS = {
     "git", "npm", "pip", "cd", "ls", "dir", "ssh", "sql", "api",
-    "ok", "lol", "gg", "install",
+    "ok", "lol", "gg", "install", "git"
 }
 
 # Русские слова: набранные по-русски не трогаем,
