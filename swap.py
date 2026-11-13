@@ -1,10 +1,12 @@
 import ctypes
 import re
+import sys
 import time
 import keyboard
 import pyperclip
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
+kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
 user32.LoadKeyboardLayoutW.restype = ctypes.c_void_p
 user32.PostMessageW.argtypes = [
@@ -12,8 +14,15 @@ user32.PostMessageW.argtypes = [
 ]
 
 WM_INPUTLANGCHANGEREQUEST = 0x0050
+ERROR_ALREADY_EXISTS = 183
 
 DEBUG = False  # поставьте True, чтобы видеть в консоли, что получает скрипт
+
+# Защита от второго экземпляра (планировщик + IDE одновременно)
+_mutex = kernel32.CreateMutexW(None, False, "Local\\swapLanguageAutocorrector")
+if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
+    print("Скрипт уже запущен, второй экземпляр закрывается.")
+    sys.exit(0)
 
 EN_CHARS = "qwertyuiop[]asdfghjkl;'zxcvbnm,./`QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>?~"
 RU_CHARS = "йцукенгшщзхъфывапролджэячсмитьбю.ёЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,Ё"
@@ -54,7 +63,7 @@ EN_BIGRAMS = {
 # Технические слова, которые никогда не трогаем
 IGNORE_WORDS = {
     "git", "npm", "pip", "cd", "ls", "dir", "ssh", "sql", "api",
-    "ok", "lol", "gg", "install", "git"
+    "ok", "lol", "gg", "install",
 }
 
 # Русские слова: набранные по-русски не трогаем,
@@ -77,6 +86,7 @@ LANG_RU = 0x0419
 
 current_word = []
 is_replacing = False
+ignore_until = 0.0  # игнорируем собственные нажатия сразу после замены
 
 
 def get_current_layout():
@@ -175,45 +185,48 @@ def should_switch(word):
 
 
 def replace_word_globally(word_len, converted_word, end_key, target_lang):
-    global is_replacing
+    global is_replacing, ignore_until
     is_replacing = True  # Блокируем новые нажатия на время исправления
 
     try:
-        old_clipboard = pyperclip.paste()
-    except Exception:
-        old_clipboard = ""
-    time.sleep(0.02)
+        try:
+            old_clipboard = pyperclip.paste()
+        except Exception:
+            old_clipboard = ""
+        time.sleep(0.02)
 
-    # Аккуратно стираем ошибочное слово с небольшой задержкой
-    for _ in range(word_len + 1):
-        keyboard.send("backspace")
-        time.sleep(0.005)
+        # Аккуратно стираем ошибочное слово (+1 за пробел)
+        for _ in range(word_len + 1):
+            keyboard.send("backspace")
+            time.sleep(0.005)
 
-    # Меняем язык системы
-    force_switch_layout(target_lang)
+        # Меняем язык системы
+        force_switch_layout(target_lang)
 
-    # Записываем исправленное слово и вставляем через буфер обмена
-    pyperclip.copy(converted_word)
-    time.sleep(0.03)
-    keyboard.send("ctrl+v")
-    time.sleep(0.05)  # Даем системе время обработать вставку
-    keyboard.send(end_key)  # Возвращаем пробел или Enter
+        # Записываем исправленное слово и вставляем через буфер обмена
+        pyperclip.copy(converted_word)
+        time.sleep(0.03)
+        keyboard.send("ctrl+v")
+        time.sleep(0.05)  # Даем системе время обработать вставку
+        keyboard.send(end_key)  # Возвращаем пробел
 
-    # Возвращаем старый буфер обмена
-    time.sleep(0.1)
-    try:
-        pyperclip.copy(old_clipboard)
-    except Exception:
-        pass
-
-    is_replacing = False
+        # Возвращаем старый буфер обмена
+        time.sleep(0.1)
+        try:
+            pyperclip.copy(old_clipboard)
+        except Exception:
+            pass
+    finally:
+        current_word.clear()
+        ignore_until = time.time() + 0.3  # не реагируем на свои же нажатия
+        is_replacing = False
 
 
 def on_key_event(event):
-    global current_word, is_replacing
+    global current_word
 
-    # Игнорируем события во время замены или если клавиша отпущена
-    if is_replacing or event.event_type != keyboard.KEY_DOWN:
+    # Игнорируем события во время замены, сразу после неё и отпускание клавиш
+    if is_replacing or time.time() < ignore_until or event.event_type != keyboard.KEY_DOWN:
         return
 
     name = event.name
@@ -232,9 +245,9 @@ def on_key_event(event):
         word_str = "".join(current_word)
         current_word.clear()
 
+        # Enter уже отправил сообщение (например, в Telegram), исправлять поздно
         if name == "enter":
             return
-
 
         result = should_switch(word_str)
         if result:
