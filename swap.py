@@ -232,6 +232,10 @@ def on_key_event(event):
         word_str = "".join(current_word)
         current_word.clear()
 
+        if name == "enter":
+            return
+
+
         result = should_switch(word_str)
         if result:
             target_lang, converted_word = result
