@@ -112,6 +112,8 @@ def force_switch_layout(target_lang):
         if get_current_layout() == target_lang:
             return
 
+    keyboard.send("alt+shift")
+    time.sleep(0.05)
 
 def bigram_ratio(word, bigrams):
     """Доля пар букв слова, которые встречаются в наборе bigrams (0..1)."""
