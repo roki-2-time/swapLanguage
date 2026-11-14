@@ -143,7 +143,7 @@ EN_BIGRAMS = {
 # Технические слова, которые никогда не трогаем
 IGNORE_WORDS = {
     "git", "npm", "pip", "cd", "ls", "dir", "ssh", "sql", "api",
-    "ok", "lol", "gg", "install", "switch"
+    "ok", "lol", "gg", "install", "switch", "checkout"
 }
 
 # Символы, которые срезаются по краям слова перед проверкой IGNORE_WORDS
