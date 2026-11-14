@@ -2,8 +2,9 @@ import ctypes
 import re
 import sys
 import time
+from ctypes import wintypes
+
 import keyboard
-import pyperclip
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -23,6 +24,85 @@ _mutex = kernel32.CreateMutexW(None, False, "Local\\swapLanguageAutocorrector")
 if ctypes.get_last_error() == ERROR_ALREADY_EXISTS:
     print("Скрипт уже запущен, второй экземпляр закрывается.")
     sys.exit(0)
+
+# ---------------------------------------------------------------------------
+# Быстрый ввод через SendInput (без буфера обмена и без пауз между клавишами)
+# ---------------------------------------------------------------------------
+INPUT_KEYBOARD = 1
+KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_UNICODE = 0x0004
+VK_BACK = 0x08
+
+ULONG_PTR = ctypes.c_size_t
+
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", wintypes.LONG), ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD), ("dwExtraInfo", ULONG_PTR),
+    ]
+
+
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
+        ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
+    ]
+
+
+class HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [
+        ("uMsg", wintypes.DWORD), ("wParamL", wintypes.WORD),
+        ("wParamH", wintypes.WORD),
+    ]
+
+
+class _INPUT_UNION(ctypes.Union):
+    _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT), ("hi", HARDWAREINPUT)]
+
+
+class INPUT(ctypes.Structure):
+    _fields_ = [("type", wintypes.DWORD), ("u", _INPUT_UNION)]
+
+
+user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
+user32.SendInput.restype = wintypes.UINT
+
+
+def _key_input(vk=0, scan=0, flags=0):
+    inp = INPUT(type=INPUT_KEYBOARD)
+    inp.u.ki = KEYBDINPUT(vk, scan, flags, 0, 0)
+    return inp
+
+
+def send_inputs(items):
+    if not items:
+        return
+    arr = (INPUT * len(items))(*items)
+    user32.SendInput(len(items), arr, ctypes.sizeof(INPUT))
+
+
+def send_backspaces(count):
+    items = []
+    for _ in range(count):
+        items.append(_key_input(vk=VK_BACK))
+        items.append(_key_input(vk=VK_BACK, flags=KEYEVENTF_KEYUP))
+    send_inputs(items)
+
+
+def send_text(text):
+    """Печатает текст как Unicode, независимо от текущей раскладки."""
+    items = []
+    for ch in text:
+        code = ord(ch)
+        items.append(_key_input(scan=code, flags=KEYEVENTF_UNICODE))
+        items.append(_key_input(scan=code, flags=KEYEVENTF_UNICODE | KEYEVENTF_KEYUP))
+    send_inputs(items)
+
+
+# ---------------------------------------------------------------------------
 
 EN_CHARS = "qwertyuiop[]asdfghjkl;'zxcvbnm,./`QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>?~"
 RU_CHARS = "йцукенгшщзхъфывапролджэячсмитьбю.ёЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,Ё"
@@ -74,7 +154,9 @@ KNOWN_RU_WORDS = {
     "звучит", "звучать", "звучало",
     "бы", "ещё", "еще", "если", "тогда", "когда", "хорошо", "пишешь",
 }
-
+KNOWN_EN_WORDS = {
+    "the",
+}
 # Односимвольные слова.
 # На английской раскладке: z -> я, b -> и
 SINGLE_EN_TO_RU = {"z", "b"}
@@ -98,7 +180,7 @@ def get_current_layout():
 
 
 def force_switch_layout(target_lang):
-    """Переключает раскладку и ждёт, пока она реально сменится."""
+    """Переключает раскладку; ждёт не дольше 0.15 с."""
     if get_current_layout() == target_lang:
         return
 
@@ -106,14 +188,14 @@ def force_switch_layout(target_lang):
     hkl = user32.LoadKeyboardLayoutW(f"{target_lang:08X}", 1)
     user32.PostMessageW(hwnd, WM_INPUTLANGCHANGEREQUEST, 0, hkl)
 
-    # Ждём до 0.5 с, пока окно обработает сообщение
-    for _ in range(25):
-        time.sleep(0.02)
+    for _ in range(30):
+        time.sleep(0.005)
         if get_current_layout() == target_lang:
             return
 
+    # Запасной вариант для окон, которые игнорируют PostMessage (Telegram)
     keyboard.send("alt+shift")
-    time.sleep(0.05)
+
 
 def bigram_ratio(word, bigrams):
     """Доля пар букв слова, которые встречаются в наборе bigrams (0..1)."""
@@ -191,36 +273,17 @@ def replace_word_globally(word_len, converted_word, end_key, target_lang):
     is_replacing = True  # Блокируем новые нажатия на время исправления
 
     try:
-        try:
-            old_clipboard = pyperclip.paste()
-        except Exception:
-            old_clipboard = ""
-        time.sleep(0.02)
+        # 1. Стираем ошибочное слово (+1 за уже набранный пробел) одним пакетом
+        send_backspaces(word_len + 1)
 
-        # Аккуратно стираем ошибочное слово (+1 за пробел)
-        for _ in range(word_len + 1):
-            keyboard.send("backspace")
-            time.sleep(0.005)
+        # 2. Сразу печатаем исправленное слово и пробел (Unicode, без буфера обмена)
+        send_text(converted_word + " ")
 
-        # Меняем язык системы
+        # 3. Только после этого меняем раскладку, чтобы текст появился мгновенно
         force_switch_layout(target_lang)
-
-        # Записываем исправленное слово и вставляем через буфер обмена
-        pyperclip.copy(converted_word)
-        time.sleep(0.03)
-        keyboard.send("ctrl+v")
-        time.sleep(0.05)  # Даем системе время обработать вставку
-        keyboard.send(end_key)  # Возвращаем пробел
-
-        # Возвращаем старый буфер обмена
-        time.sleep(0.1)
-        try:
-            pyperclip.copy(old_clipboard)
-        except Exception:
-            pass
     finally:
         current_word.clear()
-        ignore_until = time.time() + 0.3  # не реагируем на свои же нажатия
+        ignore_until = time.time() + 0.08  # не реагируем на свои же нажатия
         is_replacing = False
 
 
