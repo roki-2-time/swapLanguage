@@ -146,6 +146,13 @@ IGNORE_WORDS = {
     "ok", "lol", "gg", "install",
 }
 
+# Символы, которые срезаются по краям слова перед проверкой IGNORE_WORDS
+# ("(git" -> "git", "git2" -> "git", "git." -> "git")
+IGNORE_STRIP_CHARS = "()[]{}\"\\/-_0123456789.,;:!?`'"
+
+# Пауза (сек) между нажатиями, после которой начинается новое слово
+WORD_TIMEOUT = 2.0
+
 # Русские слова: набранные по-русски не трогаем,
 # набранные латиницей (например ,ele) всегда превращаем в русские.
 # Сюда добавляйте слова, с которыми эвристика ошибается.
@@ -169,6 +176,7 @@ LANG_RU = 0x0419
 current_word = []
 is_replacing = False
 ignore_until = 0.0  # игнорируем собственные нажатия сразу после замены
+last_key_time = 0.0  # время последнего нажатия (для сброса буфера по паузе)
 
 
 def get_current_layout():
@@ -207,14 +215,27 @@ def bigram_ratio(word, bigrams):
 
 
 def should_switch(word):
-    word_l = word.lower()
-    if not word or word_l in IGNORE_WORDS:
+    if not word:
         return None
+
+    word_l = word.lower()
+    core = word_l.strip(IGNORE_STRIP_CHARS)  # слово без скобок, цифр, знаков
 
     layout = get_current_layout()
 
     if DEBUG:
-        print(f"word={word!r} layout={hex(layout)}")
+        print(f"word={word!r} core={core!r} layout={hex(layout)}")
+
+    # --- Технические слова: не трогаем ---
+    if word_l in IGNORE_WORDS or core in IGNORE_WORDS:
+        return None
+
+    # Технические слова, набранные на русской раскладке (git -> пше):
+    # возвращаем английский вариант и переключаем раскладку на EN
+    if layout == LANG_RU and core:
+        core_en = core.translate(RU_TO_EN)
+        if core_en in IGNORE_WORDS:
+            return LANG_EN, word.translate(RU_TO_EN)
 
     # --- Односимвольные слова ---
     if len(word) == 1:
@@ -288,11 +309,17 @@ def replace_word_globally(word_len, converted_word, end_key, target_lang):
 
 
 def on_key_event(event):
-    global current_word
+    global current_word, last_key_time
 
     # Игнорируем события во время замены, сразу после неё и отпускание клавиш
     if is_replacing or time.time() < ignore_until or event.event_type != keyboard.KEY_DOWN:
         return
+
+    # Долгая пауза в наборе: клик мышью, смена окна и т.п. — начинаем слово заново
+    now = time.time()
+    if now - last_key_time > WORD_TIMEOUT:
+        current_word.clear()
+    last_key_time = now
 
     name = event.name
 
